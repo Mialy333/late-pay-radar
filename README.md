@@ -55,3 +55,46 @@ accuracy, ROC-AUC, precision, recall).
 
 Requires a `TABPFN_TOKEN` in `.env` (see `.env.example`) — get one at
 <https://ux.priorlabs.ai/account> after accepting the TabPFN licence.
+
+## Agent
+
+A small Strands Agents agent, backed by a local Gemma model via Ollama
+(`gemma4:e2b`, same setup as the Week 1 project), that explains ONE
+invoice's risk and drafts ONE reminder for it. Ranking across many invoices
+is deliberately NOT the agent's job — `list_open_invoices()` sorts and caps
+to `top_n` in code (for a future code-computed UI table), so the small
+model never has to sort or pick from a long list itself.
+
+- `late_pay_radar/scoring.py` — hybrid router: fewer than 3 prior invoices
+  for a client → TabPFN's predicted probability (confidence "low"); 3+ →
+  `client_past_late_ratio` directly (confidence "normal"). Matches what
+  `scripts/cold_start_analysis.py` found actually ranks better in each case.
+  TabPFN is trained once on resolved Barnet invoices and cached in-process.
+  Every result also carries `currency`, a locale-formatted `amount_display`,
+  `due_status` ("not yet due, due in N days" / "overdue by N days") and
+  `as_of_date` — computed from the invoice's own issue date (for
+  `data/my_invoice.csv`) or the Barnet report's own cutoff date (for Barnet
+  invoices), never from today's real date — plus a `training_data_note`
+  whenever the TabPFN fallback fires.
+- `late_pay_radar/tools.py` — two Strands tools: `list_open_invoices(top_n=5)`
+  (pre-sorted by risk, tie-broken by amount, with an explicit `rank`) and
+  `get_invoice_risk(invoice_id)`. Only the latter is given to the agent.
+  Both combine open Barnet invoices with the user's own
+  `data/my_invoice.csv` (scored as of its issue date, ignoring any
+  `paid_date` already on file).
+- `late_pay_radar/agent.py` — system prompt: explain risk in 2-3 plain
+  sentences using only tool-returned numbers; draft a friendly pre-due
+  reminder or a firm overdue one depending on `due_status`, using
+  `amount_display` as-is. Never invent figures.
+
+```bash
+ollama pull gemma4:e2b   # if not already present
+uv run python scripts/agent_demo.py
+```
+
+Runs 2 prompts (one invoice in French, one in English) and, per run: logs
+tools called, their arguments, and total latency; deterministically appends
+`training_data_note` as a `Note:` line when present (never left to the
+model); and validates each drafted reminder actually contains the real
+amount and due date, sending one corrective follow-up if not (logged as
+`retried: True/False`, with a warning if still invalid after that retry).
