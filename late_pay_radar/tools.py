@@ -22,7 +22,7 @@ import pandas as pd
 from strands import tool
 
 from late_pay_radar.features import build_features
-from late_pay_radar.scoring import rank_open_invoices, score_invoices
+from late_pay_radar.scoring import format_amount, rank_open_invoices, score_invoices
 
 BARNET_DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "barnet_invoices.csv"
 MY_INVOICE_PATH = Path(__file__).resolve().parent.parent / "data" / "my_invoice.csv"
@@ -94,11 +94,15 @@ def list_open_invoices(top_n: int = 5) -> list[dict]:
 
 
 @tool
-def get_invoice_risk(invoice_id: str) -> dict | None:
+def get_invoice_risk(invoice_id: str, language: str = "English") -> dict | None:
     """Get the late-payment risk score for one specific invoice by its id.
 
     Args:
         invoice_id: The invoice's id, e.g. "BARNET-00123" or "2026-001".
+        language: "French" or "English" -- the language you're replying in.
+            amount_display is formatted for this language (e.g. French
+            "3 250,00 €" vs English "€3,250.00"); pass it so you
+            don't have to reformat the amount yourself.
 
     Returns a dict (risk 0-1, source, confidence, client_invoice_count,
     client_past_late_ratio, amount, currency, amount_display, due_date,
@@ -108,10 +112,13 @@ def get_invoice_risk(invoice_id: str) -> dict | None:
     features = build_features(_active_loader())
     scored = score_invoices(features)
     result = next((r for r in scored if r["invoice_id"] == invoice_id), None)
+    if result is not None:
+        result = dict(result)
+        result["amount_display"] = format_amount(result["amount"], result["currency"], language)
     CALL_LOG.append(
         {
             "tool": "get_invoice_risk",
-            "args": {"invoice_id": invoice_id},
+            "args": {"invoice_id": invoice_id, "language": language},
             "seconds": round(time.perf_counter() - start, 3),
             "training_data_notes": _collect_notes(result),
             "result": result,

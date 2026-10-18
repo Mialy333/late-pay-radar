@@ -47,15 +47,20 @@ def _currency_for(invoice_id: str) -> str:
     return "GBP" if invoice_id.startswith("BARNET-") else "EUR"
 
 
-def _format_amount(amount: float, currency: str) -> str:
-    """Locale-appropriate display string, tied to currency (not the reminder's language)."""
+CURRENCY_SYMBOLS = {"EUR": "€", "GBP": "£"}
+
+
+def format_amount(amount: float, currency: str, language: str = "English") -> str:
+    """Locale-appropriate display string: the currency symbol comes from `currency`,
+    but the number format (and symbol placement) follows `language` -- French
+    "3 250,00 €" vs English "€3,250.00" for the same EUR amount.
+    """
+    symbol = CURRENCY_SYMBOLS.get(currency, f"{currency} ")
     plain = f"{amount:,.2f}"  # e.g. "3,738.89"
-    if currency == "EUR":
+    if language == "French":
         integer_part, decimal_part = plain.split(".")
-        return f"{integer_part.replace(',', ' ')},{decimal_part} €"  # "3 738,89 €"
-    if currency == "GBP":
-        return f"£{plain}"  # "£3,738.89"
-    return f"{plain} {currency}"
+        return f"{integer_part.replace(',', ' ')},{decimal_part} {symbol}"  # "3 738,89 £"
+    return f"{symbol}{plain}"  # "£3,738.89"
 
 
 def _due_status(due_date: date, as_of: date) -> str:
@@ -164,7 +169,7 @@ def score_invoices(features_df: pd.DataFrame) -> list[dict]:
                 "client_past_late_ratio": round(float(inv["client_past_late_ratio"]), 3),
                 "amount": amount,
                 "currency": currency,
-                "amount_display": _format_amount(amount, currency),
+                "amount_display": format_amount(amount, currency),
                 "due_date": due_date.isoformat(),
                 "due_status": _due_status(due_date, as_of),
                 "as_of_date": as_of.isoformat(),

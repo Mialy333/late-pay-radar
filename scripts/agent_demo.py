@@ -41,7 +41,7 @@ def run(agent, prompt: str) -> None:
     retried = False
     still_invalid = False
     if invoice is not None:
-        valid = reminder_is_valid(text, invoice["amount_display"], invoice["due_date"])
+        valid = reminder_is_valid(text, invoice["amount"], invoice["currency"], invoice["due_date"])
         if not valid:
             followup = (
                 f"Your reminder must include the amount {invoice['amount_display']} "
@@ -50,7 +50,9 @@ def run(agent, prompt: str) -> None:
             result = agent(followup)
             text = str(result)
             retried = True
-            still_invalid = not reminder_is_valid(text, invoice["amount_display"], invoice["due_date"])
+            still_invalid = not reminder_is_valid(
+                text, invoice["amount"], invoice["currency"], invoice["due_date"]
+            )
 
     total_seconds = time.perf_counter() - start
 

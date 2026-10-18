@@ -172,21 +172,18 @@ if raw_df is not None and len(raw_df) > 0:
                     "due_status": r["due_status"],
                     "risk": f"{r['risk'] * 100:.0f}%",
                     "source": r["source"],
-                    "confidence": r["confidence"],
+                    "confidence": "⚠ low" if r["confidence"] == "low" else r["confidence"],
                 }
                 for i, r in enumerate(scored)
             ]
         )
 
-        def _highlight_low_confidence(row: pd.Series) -> list[str]:
-            style = "background-color: #fff3cd" if row["confidence"] == "low" else ""
-            return [style] * len(row)
-
-        st.dataframe(
-            table.style.apply(_highlight_low_confidence, axis=1),
-            hide_index=True,
-            use_container_width=True,
-        )
+        st.dataframe(table, hide_index=True, use_container_width=True)
+        if any(r["confidence"] == "low" for r in scored):
+            st.caption(
+                "⚠ low = new client: score from TabPFN trained on UK public-sector data, "
+                "treat with caution."
+            )
 
         st.subheader("Explain & draft reminder")
         invoice_ids = [r["invoice_id"] for r in scored]
@@ -200,7 +197,7 @@ if raw_df is not None and len(raw_df) > 0:
                 CALL_LOG.clear()
                 start = time.perf_counter()
 
-                explanation = str(agent(f"Explain the risk on invoice {selected_id}."))
+                explanation = str(agent(f"Explain the risk on invoice {selected_id}, in {lang_word}."))
                 reminder = str(agent(f"Now draft a reminder for this invoice in {lang_word}."))
 
                 invoice = next(
@@ -210,7 +207,7 @@ if raw_df is not None and len(raw_df) > 0:
                 retried = False
                 still_invalid = False
                 if invoice is not None and not reminder_is_valid(
-                    reminder, invoice["amount_display"], invoice["due_date"]
+                    reminder, invoice["amount"], invoice["currency"], invoice["due_date"]
                 ):
                     followup = (
                         f"Your reminder must include the amount {invoice['amount_display']} "
@@ -219,7 +216,7 @@ if raw_df is not None and len(raw_df) > 0:
                     reminder = str(agent(followup))
                     retried = True
                     still_invalid = not reminder_is_valid(
-                        reminder, invoice["amount_display"], invoice["due_date"]
+                        reminder, invoice["amount"], invoice["currency"], invoice["due_date"]
                     )
 
                 total_seconds = time.perf_counter() - start
@@ -233,7 +230,7 @@ if raw_df is not None and len(raw_df) > 0:
                 st.warning("Reminder may still be missing the exact amount or due date after 1 retry.")
 
             st.markdown("**Reminder** (copyable)")
-            st.code(reminder, language=None)
+            st.code(reminder, language=None, wrap_lines=True)
 
             tools_called = ", ".join(c["tool"] for c in CALL_LOG)
             st.caption(
