@@ -15,12 +15,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from late_pay_radar.agent import build_agent
+from late_pay_radar.reminder_check import reminder_is_valid
 from late_pay_radar.tools import CALL_LOG, list_open_invoices
-
-FRENCH_MONTHS = [
-    "janvier", "février", "mars", "avril", "mai", "juin",
-    "juillet", "août", "septembre", "octobre", "novembre", "décembre",
-]  # fmt: skip
 
 
 def pick_barnet_invoice_id() -> str:
@@ -29,19 +25,6 @@ def pick_barnet_invoice_id() -> str:
     CALL_LOG.clear()  # this lookup is setup, not part of a logged demo run
     barnet = next((inv for inv in open_invoices if inv["invoice_id"].startswith("BARNET-")), None)
     return barnet["invoice_id"] if barnet else open_invoices[0]["invoice_id"]
-
-
-def due_date_variants(due_date_iso: str) -> list[str]:
-    """Acceptable ways of writing this due date: '31 juillet', '31/07/2026', '2026-07-31'."""
-    y, m, d = due_date_iso.split("-")
-    return [f"{int(d)} {FRENCH_MONTHS[int(m) - 1]}", f"{d}/{m}/{y}", due_date_iso]
-
-
-def reminder_is_valid(text: str, amount_display: str, due_date_iso: str) -> bool:
-    text_norm = text.lower()
-    has_amount = amount_display.lower() in text_norm
-    has_date = any(v.lower() in text_norm for v in due_date_variants(due_date_iso))
-    return has_amount and has_date
 
 
 def get_invoice_result_from_log() -> dict | None:

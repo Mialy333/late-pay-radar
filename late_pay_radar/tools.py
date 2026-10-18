@@ -15,18 +15,30 @@ said at the time, not what we now know with hindsight.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pandas as pd
 from strands import tool
 
 from late_pay_radar.features import build_features
-from late_pay_radar.scoring import score_invoices
+from late_pay_radar.scoring import rank_open_invoices, score_invoices
 
 BARNET_DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "barnet_invoices.csv"
 MY_INVOICE_PATH = Path(__file__).resolve().parent.parent / "data" / "my_invoice.csv"
 
 CALL_LOG: list[dict] = []
+
+# get_invoice_risk looks up invoices from whichever dataframe this currently
+# points at. Defaults to the combined Barnet + my_invoice.csv set (CLI demo
+# behavior); app.py swaps this to whatever data source is selected in the UI
+# (the Barnet demo, or the user's uploaded CSV, kept in memory only).
+_active_loader: Callable[[], pd.DataFrame] = lambda: _load_combined()  # noqa: E731
+
+
+def set_active_loader(loader: Callable[[], pd.DataFrame]) -> None:
+    global _active_loader
+    _active_loader = loader
 
 
 def _collect_notes(result: list[dict] | dict | None) -> list[str]:
@@ -66,9 +78,7 @@ def list_open_invoices(top_n: int = 5) -> list[dict]:
     amount, highest first.
     """
     start = time.perf_counter()
-    features = build_features(_load_combined())
-    open_invoices = features[features["paid_date"].isna()]
-    scored = sorted(score_invoices(open_invoices), key=lambda r: (r["risk"], r["amount"]), reverse=True)[:top_n]
+    scored = rank_open_invoices(_load_combined())[:top_n]
     for rank, row in enumerate(scored, start=1):
         row["rank"] = rank
     CALL_LOG.append(
@@ -95,7 +105,7 @@ def get_invoice_risk(invoice_id: str) -> dict | None:
     due_status, as_of_date, training_data_note), or None if not found.
     """
     start = time.perf_counter()
-    features = build_features(_load_combined())
+    features = build_features(_active_loader())
     scored = score_invoices(features)
     result = next((r for r in scored if r["invoice_id"] == invoice_id), None)
     CALL_LOG.append(

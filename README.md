@@ -98,3 +98,39 @@ tools called, their arguments, and total latency; deterministically appends
 model); and validates each drafted reminder actually contains the real
 amount and due date, sending one corrective follow-up if not (logged as
 `retried: True/False`, with a warning if still invalid after that retry).
+
+## UI
+
+```bash
+uv run streamlit run app.py
+```
+
+One page (`app.py`): pick a data source (the Barnet demo, or your own data —
+upload a CSV, or one or more **text-based** PDF invoices), see the full
+ranked table (rank, amount, due status, risk %, source, confidence —
+computed entirely in code, no LLM; low-confidence rows highlighted), then
+pick one invoice and a language to get an explanation and a validated,
+copyable reminder from the agent.
+
+**PDF import** (`late_pay_radar/pdf_import.py`): text is extracted locally
+with `pdfplumber`; scanned/image-only PDFs (no extractable text) are
+rejected with a clear message rather than guessed at. The extracted text is
+sent to the same local Gemma model to pull out `invoice_id, client, amount,
+currency, issue_date, due_date, paid_date` as JSON; results are validated
+(dates parse, amount > 0, due_date ≥ issue_date), with one retry on
+failure and only the still-invalid fields blanked (not the whole record) if
+that retry doesn't fix it. Nothing is scored until the user reviews the
+extracted fields in an editable table and clicks **Confirm** — and nothing
+is ever written to disk, for either CSVs or PDFs; everything stays in the
+in-memory upload buffer / Streamlit session state.
+
+**Privacy note:** checked whether `tabpfn` makes any network call at
+inference time now that its weights are cached — it doesn't. The package
+has no telemetry code path at all; its only network calls (model download +
+one-time license check) are gated behind a local-file-exists check, so once
+weights are cached they never run. Verified empirically by forcing all
+network access to fail (bogus proxy + `HF_HUB_OFFLINE=1`) and confirming
+`fit`/`predict` still succeed. Separately, Streamlit's own anonymous usage
+telemetry is disabled via `.streamlit/config.toml`
+(`browser.gatherUsageStats = false`) — unrelated to invoice data, but
+disabled anyway since the app claims to run entirely on your machine.

@@ -88,12 +88,22 @@ class ScoringModel:
 
 
 def _encode_categories(df: pd.DataFrame, categories: dict[str, dict[str, int]]) -> pd.DataFrame:
+    """Add a `{col}_code` column for every trained categorical feature.
+
+    Must produce these columns even when `col` is entirely absent from `df`
+    (e.g. a dataset -- an upload, or my_invoice.csv alone -- that never had
+    supplier_type/invoice_source at all): the model's feature_columns always
+    includes them, so every row gets the "unseen category" fallback code
+    rather than a missing-column error.
+    """
     df = df.copy()
     for col, mapping in categories.items():
-        if col not in df.columns:
-            continue
         unseen_code = len(mapping)
-        df[f"{col}_code"] = df[col].map(mapping).fillna(unseen_code).astype(int)
+        code_col = f"{col}_code"
+        if col in df.columns:
+            df[code_col] = df[col].map(mapping).fillna(unseen_code).astype(int)
+        else:
+            df[code_col] = unseen_code
     return df
 
 
@@ -162,3 +172,13 @@ def score_invoices(features_df: pd.DataFrame) -> list[dict]:
             }
         )
     return rows
+
+
+def rank_open_invoices(raw_df: pd.DataFrame) -> list[dict]:
+    """Score every open (unpaid) invoice in a raw invoice dataframe, ranked by
+    risk then amount (both highest first). Dataset-agnostic: works for
+    Barnet, the user's own invoices, or any dataframe matching our schema.
+    """
+    features = build_features(raw_df)
+    open_invoices = features[features["paid_date"].isna()]
+    return sorted(score_invoices(open_invoices), key=lambda r: (r["risk"], r["amount"]), reverse=True)

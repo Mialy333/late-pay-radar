@@ -38,6 +38,9 @@ Use amount_display exactly as given -- it's already formatted for that
 invoice's currency, don't reformat or recompute it. Write the reminder in
 the language requested (French or English; default to English if not
 specified).
+
+When writing in French, always say "la facture" for "invoice" -- never use
+the English word "invoice" in a French sentence.
 """
 
 
