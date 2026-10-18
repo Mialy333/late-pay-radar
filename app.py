@@ -31,6 +31,64 @@ from late_pay_radar.tools import CALL_LOG, set_active_loader
 BARNET_DATA_PATH = Path(__file__).resolve().parent / "data" / "barnet_invoices.csv"
 EXPECTED_COLUMNS = ["invoice_id", "client", "amount_eur", "issue_date", "due_date", "paid_date"]
 
+
+@st.cache_resource
+def get_agent():
+    """One cached Agent for the app's lifetime -- st.cache_resource, per the task.
+    Its conversation history is reset before every use (see run_agent_flow) so
+    different invoices/clicks never leak context into each other."""
+    return build_agent()
+
+
+@st.cache_data
+def get_scored_table(df: pd.DataFrame) -> list[dict]:
+    """Cached on the dataframe's own content (Streamlit hashes it) -- the
+    uploaded/demo data is the cache key, nothing written to disk."""
+    return rank_open_invoices(df)
+
+
+def run_agent_flow(invoice_id: str, lang_word: str) -> dict:
+    """Explain + draft a reminder for one invoice, with the validate/retry
+    step. Returns everything the UI needs to render, for storage in
+    st.session_state keyed by (invoice_id, language)."""
+    agent = get_agent()
+    agent.messages = []  # fresh conversation per call -- the cached agent must not remember past invoices
+    CALL_LOG.clear()
+    start = time.perf_counter()
+
+    explanation = str(agent(f"Explain the risk on invoice {invoice_id}, in {lang_word}."))
+    reminder = str(agent(f"Now draft a reminder for this invoice in {lang_word}."))
+
+    invoice = next(
+        (c["result"] for c in CALL_LOG if c["tool"] == "get_invoice_risk" and c.get("result")),
+        None,
+    )
+    retried = False
+    still_invalid = False
+    if invoice is not None and not reminder_is_valid(
+        reminder, invoice["amount"], invoice["currency"], invoice["due_date"]
+    ):
+        followup = (
+            f"Your reminder must include the amount {invoice['amount_display']} "
+            f"and the due date {invoice['due_date']}. Rewrite only the reminder."
+        )
+        reminder = str(agent(followup))
+        retried = True
+        still_invalid = not reminder_is_valid(
+            reminder, invoice["amount"], invoice["currency"], invoice["due_date"]
+        )
+
+    return {
+        "explanation": explanation,
+        "reminder": reminder,
+        "training_data_note": invoice.get("training_data_note") if invoice else None,
+        "retried": retried,
+        "still_invalid": still_invalid,
+        "tools_called": ", ".join(c["tool"] for c in CALL_LOG),
+        "total_seconds": time.perf_counter() - start,
+    }
+
+
 st.set_page_config(page_title="Late Pay Radar", page_icon="📡")
 
 st.title("Late Pay Radar")
@@ -156,7 +214,7 @@ else:
         set_active_loader(lambda: raw_df)
 
 if raw_df is not None and len(raw_df) > 0:
-    scored = rank_open_invoices(raw_df)
+    scored = get_scored_table(raw_df)
 
     if not scored:
         st.info("No open invoices in this dataset.")
@@ -187,53 +245,36 @@ if raw_df is not None and len(raw_df) > 0:
 
         st.subheader("Explain & draft reminder")
         invoice_ids = [r["invoice_id"] for r in scored]
-        selected_id = st.selectbox("Invoice", invoice_ids)
-        language = st.radio("Language", ["Français", "English"], horizontal=True)
 
-        if st.button("Explain & draft reminder"):
+        # Widgets inside the form don't trigger a rerun on change -- only
+        # the submit button does, so switching language alone does nothing
+        # until the user actually clicks it.
+        with st.form("explain_form"):
+            selected_id = st.selectbox("Invoice", invoice_ids)
+            language = st.radio("Language", ["Français", "English"], horizontal=True)
+            submitted = st.form_submit_button("Explain & draft reminder")
+
+        if submitted:
             lang_word = "French" if language == "Français" else "English"
             with st.spinner("Asking the agent..."):
-                agent = build_agent()
-                CALL_LOG.clear()
-                start = time.perf_counter()
-
-                explanation = str(agent(f"Explain the risk on invoice {selected_id}, in {lang_word}."))
-                reminder = str(agent(f"Now draft a reminder for this invoice in {lang_word}."))
-
-                invoice = next(
-                    (c["result"] for c in CALL_LOG if c["tool"] == "get_invoice_risk" and c.get("result")),
-                    None,
+                st.session_state.setdefault("results", {})[(selected_id, language)] = run_agent_flow(
+                    selected_id, lang_word
                 )
-                retried = False
-                still_invalid = False
-                if invoice is not None and not reminder_is_valid(
-                    reminder, invoice["amount"], invoice["currency"], invoice["due_date"]
-                ):
-                    followup = (
-                        f"Your reminder must include the amount {invoice['amount_display']} "
-                        f"and the due date {invoice['due_date']}. Rewrite only the reminder."
-                    )
-                    reminder = str(agent(followup))
-                    retried = True
-                    still_invalid = not reminder_is_valid(
-                        reminder, invoice["amount"], invoice["currency"], invoice["due_date"]
-                    )
 
-                total_seconds = time.perf_counter() - start
-
+        result = st.session_state.get("results", {}).get((selected_id, language))
+        if result is not None:
             st.markdown("**Explanation**")
-            st.write(explanation)
+            st.write(result["explanation"])
 
-            if invoice is not None and invoice.get("training_data_note"):
-                st.info(invoice["training_data_note"])
-            if still_invalid:
+            if result["training_data_note"]:
+                st.info(result["training_data_note"])
+            if result["still_invalid"]:
                 st.warning("Reminder may still be missing the exact amount or due date after 1 retry.")
 
             st.markdown("**Reminder** (copyable)")
-            st.code(reminder, language=None, wrap_lines=True)
+            st.code(result["reminder"], language=None, wrap_lines=True)
 
-            tools_called = ", ".join(c["tool"] for c in CALL_LOG)
             st.caption(
-                f"Tools called: {tools_called or 'none'} · Retried: {retried} · "
-                f"Latency: {total_seconds:.1f}s"
+                f"Tools called: {result['tools_called'] or 'none'} · "
+                f"Retried: {result['retried']} · Latency: {result['total_seconds']:.1f}s"
             )
