@@ -15,7 +15,7 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from late_pay_radar.agent import REMINDER_MARKER, build_agent
+from late_pay_radar.agent import build_agent
 from late_pay_radar.pdf_import import (
     EXTRACTION_FIELDS,
     SCANNED_PDF_MESSAGE,
@@ -25,7 +25,7 @@ from late_pay_radar.pdf_import import (
     has_extractable_text,
 )
 from late_pay_radar.reminder_check import reminder_is_valid
-from late_pay_radar.scoring import rank_open_invoices
+from late_pay_radar.scoring import format_amount, rank_open_invoices
 from late_pay_radar.tools import CALL_LOG, set_active_loader
 
 BARNET_DATA_PATH = Path(__file__).resolve().parent / "data" / "barnet_invoices.csv"
@@ -47,54 +47,52 @@ def get_scored_table(df: pd.DataFrame) -> list[dict]:
     return rank_open_invoices(df)
 
 
-def run_agent_flow(invoice_id: str, lang_word: str) -> dict:
-    """Explain + draft a reminder for one invoice in a SINGLE agent call
-    (both parts come back in one reply, split on REMINDER_MARKER), with the
-    validate/retry step applied to the reminder half only. Returns
-    everything the UI needs to render, for storage in st.session_state
-    keyed by (invoice_id, language)."""
+def explanation_is_valid(text: str) -> bool:
+    """Reject garbage explanations: too short, or shouting in all caps."""
+    text = text.strip()
+    return len(text) >= 40 and not text.isupper()
+
+
+def run_agent_flow(invoice: dict, lang_word: str) -> dict:
+    """Explain + draft a reminder for one invoice via TWO separate agent
+    calls (the single-call version broke: the model sometimes skipped the
+    tool call entirely and invented figures, with no tool result for the
+    validator to check against).
+
+    FAIL CLOSED: `invoice` is fetched in CODE before any agent call, via the
+    same scoring function the tool uses (not from whatever -- if anything
+    -- the tool call returns). The reminder is ALWAYS validated against
+    this ground truth, whether or not the agent actually called the tool.
+    """
     agent = get_agent()
     agent.messages = []  # fresh conversation per call -- the cached agent must not remember past invoices
     CALL_LOG.clear()
     start = time.perf_counter()
 
-    raw = str(
-        agent(
-            f"Explain the risk on invoice {invoice_id} and draft a reminder, both in "
-            f"{lang_word}. Separate them with a line that says exactly {REMINDER_MARKER}."
-        )
-    )
-    if REMINDER_MARKER in raw:
-        explanation, reminder = (part.strip() for part in raw.split(REMINDER_MARKER, 1))
-    else:
-        explanation, reminder = raw.strip(), ""  # marker missing: retry below will still fix the reminder
+    invoice_id = invoice["invoice_id"]
+    amount_display = format_amount(invoice["amount"], invoice["currency"], lang_word)
 
-    invoice = next(
-        (c["result"] for c in CALL_LOG if c["tool"] == "get_invoice_risk" and c.get("result")),
-        None,
-    )
+    explanation = str(agent(f"Explain the risk on invoice {invoice_id}, in {lang_word}.")).strip()
+    reminder = str(agent(f"Now draft a reminder for this invoice in {lang_word}.")).strip()
+
     retried = False
-    still_invalid = False
-    if invoice is not None and not reminder_is_valid(
-        reminder, invoice["amount"], invoice["currency"], invoice["due_date"]
-    ):
+    if not reminder_is_valid(reminder, invoice["amount"], invoice["currency"], invoice["due_date"]):
         followup = (
-            f"Your reminder must include the amount {invoice['amount_display']} "
-            f"and the due date {invoice['due_date']}. Rewrite ONLY the reminder, nothing "
-            f"else -- no explanation, no {REMINDER_MARKER} marker."
+            f"Your reminder must include the amount {amount_display} "
+            f"and the due date {invoice['due_date']}. Rewrite only the reminder."
         )
         reminder = str(agent(followup)).strip()
         retried = True
-        still_invalid = not reminder_is_valid(
-            reminder, invoice["amount"], invoice["currency"], invoice["due_date"]
-        )
+
+    reminder_valid = reminder_is_valid(reminder, invoice["amount"], invoice["currency"], invoice["due_date"])
 
     return {
         "explanation": explanation,
+        "explanation_valid": explanation_is_valid(explanation),
         "reminder": reminder,
-        "training_data_note": invoice.get("training_data_note") if invoice else None,
+        "reminder_valid": reminder_valid,
+        "training_data_note": invoice.get("training_data_note"),
         "retried": retried,
-        "still_invalid": still_invalid,
         "tools_called": ", ".join(c["tool"] for c in CALL_LOG),
         "total_seconds": time.perf_counter() - start,
     }
@@ -267,23 +265,31 @@ if raw_df is not None and len(raw_df) > 0:
 
         if submitted:
             lang_word = "French" if language == "Français" else "English"
+            invoice = next((r for r in scored if r["invoice_id"] == selected_id), None)
             with st.spinner("Asking the agent..."):
                 st.session_state.setdefault("results", {})[(selected_id, language)] = run_agent_flow(
-                    selected_id, lang_word
+                    invoice, lang_word
                 )
 
         result = st.session_state.get("results", {}).get((selected_id, language))
         if result is not None:
-            st.markdown("**Explanation**")
-            st.write(result["explanation"])
+            if result["explanation_valid"]:
+                st.markdown("**Explanation**")
+                st.write(result["explanation"])
+            else:
+                st.error("The explanation looks invalid (too short or all caps) -- not shown.")
 
             if result["training_data_note"]:
                 st.info(result["training_data_note"])
-            if result["still_invalid"]:
-                st.warning("Reminder may still be missing the exact amount or due date after 1 retry.")
 
-            st.markdown("**Reminder** (copyable)")
-            st.code(result["reminder"], language=None, wrap_lines=True)
+            if result["reminder_valid"]:
+                st.markdown("**Reminder** (copyable)")
+                st.code(result["reminder"], language=None, wrap_lines=True)
+            else:
+                st.error(
+                    "The reminder is still missing the exact amount or due date after 1 "
+                    "retry -- not shown."
+                )
 
             st.caption(
                 f"Tools called: {result['tools_called'] or 'none'} · "
