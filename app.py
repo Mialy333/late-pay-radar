@@ -15,7 +15,7 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from late_pay_radar.agent import build_agent
+from late_pay_radar.agent import REMINDER_MARKER, build_agent
 from late_pay_radar.pdf_import import (
     EXTRACTION_FIELDS,
     SCANNED_PDF_MESSAGE,
@@ -48,16 +48,26 @@ def get_scored_table(df: pd.DataFrame) -> list[dict]:
 
 
 def run_agent_flow(invoice_id: str, lang_word: str) -> dict:
-    """Explain + draft a reminder for one invoice, with the validate/retry
-    step. Returns everything the UI needs to render, for storage in
-    st.session_state keyed by (invoice_id, language)."""
+    """Explain + draft a reminder for one invoice in a SINGLE agent call
+    (both parts come back in one reply, split on REMINDER_MARKER), with the
+    validate/retry step applied to the reminder half only. Returns
+    everything the UI needs to render, for storage in st.session_state
+    keyed by (invoice_id, language)."""
     agent = get_agent()
     agent.messages = []  # fresh conversation per call -- the cached agent must not remember past invoices
     CALL_LOG.clear()
     start = time.perf_counter()
 
-    explanation = str(agent(f"Explain the risk on invoice {invoice_id}, in {lang_word}."))
-    reminder = str(agent(f"Now draft a reminder for this invoice in {lang_word}."))
+    raw = str(
+        agent(
+            f"Explain the risk on invoice {invoice_id} and draft a reminder, both in "
+            f"{lang_word}. Separate them with a line that says exactly {REMINDER_MARKER}."
+        )
+    )
+    if REMINDER_MARKER in raw:
+        explanation, reminder = (part.strip() for part in raw.split(REMINDER_MARKER, 1))
+    else:
+        explanation, reminder = raw.strip(), ""  # marker missing: retry below will still fix the reminder
 
     invoice = next(
         (c["result"] for c in CALL_LOG if c["tool"] == "get_invoice_risk" and c.get("result")),
@@ -70,9 +80,10 @@ def run_agent_flow(invoice_id: str, lang_word: str) -> dict:
     ):
         followup = (
             f"Your reminder must include the amount {invoice['amount_display']} "
-            f"and the due date {invoice['due_date']}. Rewrite only the reminder."
+            f"and the due date {invoice['due_date']}. Rewrite ONLY the reminder, nothing "
+            f"else -- no explanation, no {REMINDER_MARKER} marker."
         )
-        reminder = str(agent(followup))
+        reminder = str(agent(followup)).strip()
         retried = True
         still_invalid = not reminder_is_valid(
             reminder, invoice["amount"], invoice["currency"], invoice["due_date"]
