@@ -12,11 +12,26 @@ FRENCH_MONTHS = [
     "juillet", "août", "septembre", "octobre", "novembre", "décembre",
 ]  # fmt: skip
 
+ENGLISH_MONTHS = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+]  # fmt: skip
+
 
 def due_date_variants(due_date_iso: str) -> list[str]:
-    """Acceptable ways of writing this due date: '31 juillet', '31/07/2026', '2026-07-31'."""
+    """Acceptable ways of writing this due date: '31 juillet', '31 July 2026',
+    'July 31, 2026' (the model's natural English ordering), '31/07/2026',
+    '2026-07-31'."""
     y, m, d = due_date_iso.split("-")
-    return [f"{int(d)} {FRENCH_MONTHS[int(m) - 1]}", f"{d}/{m}/{y}", due_date_iso]
+    day = int(d)
+    month_en = ENGLISH_MONTHS[int(m) - 1]
+    return [
+        f"{day} {FRENCH_MONTHS[int(m) - 1]}",
+        f"{day} {month_en} {y}",
+        f"{month_en} {day}, {y}",
+        f"{d}/{m}/{y}",
+        due_date_iso,
+    ]
 
 
 def amount_variants(amount: float, currency: str) -> list[str]:
