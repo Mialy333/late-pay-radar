@@ -1,8 +1,82 @@
 # late-pay-radar
 
-Backtest spike: can issue-time-only features beat a naive "late iff the
-client's previous invoice was late" baseline at predicting invoices that
-will be paid more than 7 days late?
+Ranks your open invoices by late-payment risk and drafts the right
+reminder — entirely on your own machine (TabPFN + a local Gemma model via
+Ollama). Demo video: <https://youtu.be/sccG2NXpBWw>
+
+## Quick start
+
+```bash
+git clone https://github.com/Mialy333/late-pay-radar && cd late-pay-radar
+uv sync
+ollama pull gemma4:e2b
+uv run python scripts/download_barnet.py && uv run python scripts/build_barnet_dataset.py
+uv run streamlit run app.py
+```
+
+Before that last command, you need a `TABPFN_TOKEN` in `.env` — see the next section.
+
+## TabPFN account (one-time)
+
+The risk model (TabPFN) needs a one-time license acceptance before it will
+run locally, even for the demo data:
+
+1. Create a free account at <https://ux.priorlabs.ai>.
+2. Accept the TabPFN-3.5 license (non-commercial use) on the Licenses tab.
+3. Copy your API key from <https://ux.priorlabs.ai/account>.
+4. `cp .env.example .env` and put the key in as `TABPFN_TOKEN=<your key>`.
+
+This is a one-time step: once accepted, it's cached locally and no further
+account/network interaction is needed (see "Why local?" below).
+
+## Why local?
+
+- **TabPFN**: trains and predicts entirely on your machine. Its only
+  network calls are the one-time model download + license check above,
+  gated behind a local-file-exists check — once its weights are cached,
+  it never touches the network again. Verified empirically, not just by
+  reading the source: ran `fit`/`predict` with all network access forced
+  to fail (a bogus proxy + `HF_HUB_OFFLINE=1`) and got the identical
+  result, same speed, as with network available.
+- **Gemma**: runs entirely through your local Ollama install
+  (`gemma4:e2b`) — no API key, no cloud call.
+- **Your invoice data**: uploaded CSVs and PDFs are read from the
+  in-memory upload buffer and never written to disk.
+- **Streamlit's own anonymous usage telemetry** is disabled via
+  `.streamlit/config.toml` (`browser.gatherUsageStats = false`) —
+  unrelated to invoice data, but disabled anyway since this app claims to
+  run entirely on your machine.
+
+## Known limitations
+
+- TabPFN (used for brand-new clients with no payment history) is trained
+  on UK public-sector supplier invoices (Barnet Council, 77% paid late) —
+  not representative of most freelance clients. Treat its score as
+  indicative, not calibrated.
+- The "TabPFN beats client history for cold-start clients" finding (see
+  `scripts/cold_start_analysis.py`) is from one backtest on one dataset —
+  indicative, not a guarantee it holds for your own clients.
+- PDF import extracts a `currency` field for your review, but it isn't
+  currently wired into `amount_display` formatting, which still infers
+  GBP-vs-EUR from the invoice ID prefix (a holdover from the Barnet-only
+  design). Imported invoices always display in EUR formatting regardless
+  of the PDF's stated currency.
+- Scanned (image-only) PDFs aren't supported — only text-based PDFs.
+- Each "Explain & draft reminder" click takes roughly 10-15s on a MacBook
+  (two local Gemma calls, plus a validation retry when needed).
+
+## Data attribution
+
+- **Barnet Council invoices**: London Borough of Barnet, "Financial
+  Invoices Late Payments" — <https://open.barnet.gov.uk/dataset/2g58n>,
+  licensed under the Open Government Licence v3.0 (OGL). Contains public
+  sector information licensed under the Open Government Licence v3.0.
+- **Synthetic invoices**: seeded random data, never real.
+
+## License
+
+MIT (see `LICENSE`) for the code in this repository. The Barnet Council
+data under `data/` is licensed separately under the OGL v3.0 above.
 
 ## Data
 
@@ -14,16 +88,16 @@ habits. Never real data.
 
 ### Barnet Council (real, open data)
 
-`uv run python scripts/build_barnet_dataset.py` builds `data/barnet_invoices.csv`
-from the two most recent period files under `data/raw/` (gitignored — re-download
-from the source below if you need them).
+```bash
+uv run python scripts/download_barnet.py      # fetches the 2 raw period files into data/raw/ (gitignored)
+uv run python scripts/build_barnet_dataset.py  # builds data/barnet_invoices.csv from them
+```
 
-- **Source:** London Borough of Barnet, "Financial Invoices Late Payments" —
-  <https://open.barnet.gov.uk/dataset/2g58n>
-- **Licence:** Open Government Licence v3.0 (OGL). Contains public sector
-  information licensed under the Open Government Licence v3.0.
-- **Attribution:** Data provided by the London Borough of Barnet under the
-  Open Government Licence v3.0.
+See "Data attribution" above for source/license. `data/barnet_invoices.csv`
+itself is committed (so the demo works out of the box), but `data/raw/`
+isn't — these two scripts are what make the pipeline reproducible from
+scratch.
+
 - **Caveat:** `amount_eur` in this dataset is actually GBP (Barnet's "Invoice
   Amount"), kept under that column name only for schema compatibility with
   the synthetic data — see `late_pay_radar/adapters/barnet.py`.
@@ -53,8 +127,7 @@ most recent, for speed):
 Prints a confusion matrix per model plus a summary table (accuracy, balanced
 accuracy, ROC-AUC, precision, recall).
 
-Requires a `TABPFN_TOKEN` in `.env` (see `.env.example`) — get one at
-<https://ux.priorlabs.ai/account> after accepting the TabPFN licence.
+Requires a `TABPFN_TOKEN` in `.env` — see "TabPFN account" above.
 
 ## Agent
 
@@ -122,15 +195,5 @@ failure and only the still-invalid fields blanked (not the whole record) if
 that retry doesn't fix it. Nothing is scored until the user reviews the
 extracted fields in an editable table and clicks **Confirm** — and nothing
 is ever written to disk, for either CSVs or PDFs; everything stays in the
-in-memory upload buffer / Streamlit session state.
-
-**Privacy note:** checked whether `tabpfn` makes any network call at
-inference time now that its weights are cached — it doesn't. The package
-has no telemetry code path at all; its only network calls (model download +
-one-time license check) are gated behind a local-file-exists check, so once
-weights are cached they never run. Verified empirically by forcing all
-network access to fail (bogus proxy + `HF_HUB_OFFLINE=1`) and confirming
-`fit`/`predict` still succeed. Separately, Streamlit's own anonymous usage
-telemetry is disabled via `.streamlit/config.toml`
-(`browser.gatherUsageStats = false`) — unrelated to invoice data, but
-disabled anyway since the app claims to run entirely on your machine.
+in-memory upload buffer / Streamlit session state. See "Why local?" at the
+top for the privacy/network story.
